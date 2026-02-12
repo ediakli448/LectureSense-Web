@@ -1,7 +1,9 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Mic, Square, Video, AlertCircle, Loader2, FileText, CheckCircle2 } from 'lucide-react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { Mic, Square, Video, AlertCircle, Loader2, FileText } from 'lucide-react';
 import { generateLectureSummary } from './services/geminiService';
+import { RecorderService, RecorderState } from './services/recorderService';
 import { SummaryView } from './components/SummaryView';
+import { useCleanup } from './hooks/useCleanup';
 import { AppState } from './types';
 
 const App: React.FC = () => {
@@ -10,147 +12,167 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [elapsedTime, setElapsedTime] = useState(0);
   
-  // Refs for state management across async operations and event listeners
-  const appStateRef = useRef<AppState>(AppState.IDLE);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
-  const timerRef = useRef<number | null>(null);
+  // Refs for services and DOM elements
+  const recorderRef = useRef<RecorderService | null>(null);
   const videoPreviewRef = useRef<HTMLVideoElement>(null);
+  const pendingBlobRef = useRef<Blob | null>(null);
+  
+  // Cleanup hook for proper resource management
+  const cleanup = useCleanup();
 
-  // Sync ref with state for event listeners
-  useEffect(() => {
-    appStateRef.current = appState;
-  }, [appState]);
-
-  useEffect(() => {
-    return () => {
-      if (timerRef.current) window.clearInterval(timerRef.current);
-    };
-  }, []);
-
-  const formatTime = (seconds: number) => {
+  /**
+   * Format seconds to MM:SS display
+   */
+  const formatTime = useCallback((seconds: number): string => {
     const mins = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  };
+  }, []);
 
-  const startRecording = async () => {
-    setError(null);
-    try {
-      // Request screen capture with system audio
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: {
-          frameRate: { ideal: 5 }
-        },
-        audio: true
-      });
-
-      // Handle user stopping the share via browser UI
-      stream.getVideoTracks()[0].onended = () => {
-        // Use ref to check current state, as closure 'appState' might be stale
-        if (appStateRef.current === AppState.RECORDING) {
-           stopRecording();
+  /**
+   * Handle recorder state changes
+   */
+  const handleRecorderStateChange = useCallback((state: RecorderState) => {
+    switch (state) {
+      case 'recording':
+        setAppState(AppState.RECORDING);
+        break;
+      case 'stopping':
+        // Transitional state, handled in onStop
+        break;
+      case 'error':
+        setAppState(AppState.ERROR);
+        break;
+      case 'idle':
+        // Only set idle if we're not processing
+        if (pendingBlobRef.current === null) {
+          // Keep current state
         }
-      };
-
-      if (videoPreviewRef.current) {
-        videoPreviewRef.current.srcObject = stream;
-        // Handle play promise to prevent Uncaught (in promise) DOMException
-        videoPreviewRef.current.play().catch(e => console.warn("Preview play interrupted:", e));
-      }
-
-      const mimeType = MediaRecorder.isTypeSupported('video/webm; codecs=vp9') 
-        ? 'video/webm; codecs=vp9' 
-        : 'video/webm';
-
-      const mediaRecorder = new MediaRecorder(stream, {
-        mimeType,
-        videoBitsPerSecond: 250000
-      });
-
-      mediaRecorderRef.current = mediaRecorder;
-      chunksRef.current = [];
-
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          chunksRef.current.push(event.data);
-        }
-      };
-
-      mediaRecorder.onstop = () => {
-        handleRecordingStop();
-        // Stop all tracks to release the screen share indicator
-        stream.getTracks().forEach(track => track.stop());
-      };
-
-      // Ensure state is inactive before starting
-      if (mediaRecorder.state !== 'inactive') {
-        throw new Error("MediaRecorder is not in inactive state");
-      }
-
-      mediaRecorder.start(1000); // Collect chunks every second
-      setAppState(AppState.RECORDING);
-      
-      setElapsedTime(0);
-      timerRef.current = window.setInterval(() => {
-        setElapsedTime(prev => prev + 1);
-      }, 1000);
-
-    } catch (err: any) {
-      console.error("Error starting recording:", err);
-
-      // Handle "Permission denied" gracefully (User clicked Cancel)
-      if (err.name === 'NotAllowedError' || err.message?.includes('Permission denied')) {
-        setError(null);
-        setAppState(AppState.IDLE);
-        return;
-      }
-      
-      // Handle "InvalidStateError"
-      if (err.name === 'InvalidStateError') {
-         setError("Recording failed to start (Invalid State). Please try refreshing the page.");
-         setAppState(AppState.IDLE);
-         return;
-      }
-
-      setError("Failed to start recording. Please ensure you grant screen permissions.");
-      setAppState(AppState.IDLE);
+        break;
     }
-  };
+  }, []);
 
-  const stopRecording = () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop();
-    }
-  };
-
-  const handleRecordingStop = async () => {
-    if (timerRef.current) {
-      clearInterval(timerRef.current);
-      timerRef.current = null;
-    }
-
+  /**
+   * Handle recording completion - process with AI
+   */
+  const handleRecordingStop = useCallback(async (blob: Blob) => {
+    // Track blob for cleanup
+    cleanup.trackBlob(blob);
+    pendingBlobRef.current = blob;
+    
     setAppState(AppState.PROCESSING);
     
     try {
-      const blob = new Blob(chunksRef.current, { type: 'video/webm' });
       const generatedText = await generateLectureSummary(blob);
       setSummary(generatedText);
       setAppState(AppState.COMPLETED);
     } catch (err) {
-      console.error("Processing failed", err);
-      setError("Failed to process the recording with Gemini. Please check your API key and try again.");
+      console.error('Processing failed:', err);
+      setError('Failed to process the recording with Gemini. Please check your API key and try again.');
       setAppState(AppState.ERROR);
+    } finally {
+      // Clear blob reference to allow garbage collection
+      pendingBlobRef.current = null;
+      cleanup.cleanupBlobs();
     }
-  };
+  }, [cleanup]);
 
-  const resetApp = () => {
+  /**
+   * Handle recorder errors
+   */
+  const handleRecorderError = useCallback((err: Error) => {
+    console.error('Recorder error:', err);
+    
+    // Handle specific errors
+    if (err.name === 'NotAllowedError' || err.message?.includes('Permission denied')) {
+      setError(null);
+      setAppState(AppState.IDLE);
+      return;
+    }
+    
+    if (err.name === 'InvalidStateError') {
+      setError('Recording failed to start. Please refresh the page and try again.');
+    } else {
+      setError('Failed to start recording. Please ensure you grant screen permissions.');
+    }
+    
+    setAppState(AppState.ERROR);
+  }, []);
+
+  /**
+   * Initialize recorder service on mount
+   */
+  useEffect(() => {
+    const recorder = new RecorderService({
+      frameRate: 5,
+      videoBitsPerSecond: 250000,
+      timeslice: 1000,
+    });
+    
+    recorder.setCallbacks({
+      onStateChange: handleRecorderStateChange,
+      onDataAvailable: () => {}, // Chunks handled internally
+      onStop: handleRecordingStop,
+      onError: handleRecorderError,
+      onTimeUpdate: setElapsedTime,
+    });
+    
+    recorderRef.current = recorder;
+    
+    // Cleanup on unmount - ensures resources are freed even on crash
+    return () => {
+      recorder.dispose();
+      cleanup.cleanupAll();
+    };
+  }, [handleRecorderStateChange, handleRecordingStop, handleRecorderError, cleanup]);
+
+  /**
+   * Update preview element reference when available
+   */
+  useEffect(() => {
+    if (recorderRef.current && videoPreviewRef.current) {
+      recorderRef.current.setPreviewElement(videoPreviewRef.current);
+    }
+  }, []);
+
+  /**
+   * Start recording
+   */
+  const startRecording = useCallback(async () => {
+    setError(null);
+    
+    if (recorderRef.current) {
+      await recorderRef.current.start();
+    }
+  }, []);
+
+  /**
+   * Stop recording
+   */
+  const stopRecording = useCallback(() => {
+    if (recorderRef.current) {
+      recorderRef.current.stop();
+    }
+  }, []);
+
+  /**
+   * Reset app to initial state
+   */
+  const resetApp = useCallback(() => {
     setAppState(AppState.IDLE);
     setSummary('');
     setError(null);
     setElapsedTime(0);
-    chunksRef.current = [];
-  };
+    pendingBlobRef.current = null;
+    
+    // Ensure all resources are cleaned up
+    cleanup.cleanupAll();
+    
+    // Dispose and recreate recorder for clean state
+    if (recorderRef.current) {
+      recorderRef.current.dispose();
+    }
+  }, [cleanup]);
 
   if (appState === AppState.COMPLETED) {
     return <SummaryView summary={summary} onReset={resetApp} />;
