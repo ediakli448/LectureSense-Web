@@ -10,10 +10,17 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [elapsedTime, setElapsedTime] = useState(0);
   
+  // Refs for state management across async operations and event listeners
+  const appStateRef = useRef<AppState>(AppState.IDLE);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<number | null>(null);
   const videoPreviewRef = useRef<HTMLVideoElement>(null);
+
+  // Sync ref with state for event listeners
+  useEffect(() => {
+    appStateRef.current = appState;
+  }, [appState]);
 
   useEffect(() => {
     return () => {
@@ -31,24 +38,25 @@ const App: React.FC = () => {
     setError(null);
     try {
       // Request screen capture with system audio
-      // Note: User must select "Share System Audio" in the browser dialog
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: {
-          frameRate: { ideal: 5 } // Low FPS as requested
+          frameRate: { ideal: 5 }
         },
-        audio: true // System Audio
+        audio: true
       });
 
-      // Check if audio track exists (User might verify if they shared audio)
-      const audioTracks = stream.getAudioTracks();
-      if (audioTracks.length === 0) {
-        console.warn("No audio track detected. Ensure 'Share system audio' was selected.");
-        // We continue anyway, but maybe show a warning UI
-      }
+      // Handle user stopping the share via browser UI
+      stream.getVideoTracks()[0].onended = () => {
+        // Use ref to check current state, as closure 'appState' might be stale
+        if (appStateRef.current === AppState.RECORDING) {
+           stopRecording();
+        }
+      };
 
       if (videoPreviewRef.current) {
         videoPreviewRef.current.srcObject = stream;
-        videoPreviewRef.current.play();
+        // Handle play promise to prevent Uncaught (in promise) DOMException
+        videoPreviewRef.current.play().catch(e => console.warn("Preview play interrupted:", e));
       }
 
       const mimeType = MediaRecorder.isTypeSupported('video/webm; codecs=vp9') 
@@ -57,7 +65,7 @@ const App: React.FC = () => {
 
       const mediaRecorder = new MediaRecorder(stream, {
         mimeType,
-        videoBitsPerSecond: 250000 // Lower bitrate for smaller files
+        videoBitsPerSecond: 250000
       });
 
       mediaRecorderRef.current = mediaRecorder;
@@ -75,6 +83,11 @@ const App: React.FC = () => {
         stream.getTracks().forEach(track => track.stop());
       };
 
+      // Ensure state is inactive before starting
+      if (mediaRecorder.state !== 'inactive') {
+        throw new Error("MediaRecorder is not in inactive state");
+      }
+
       mediaRecorder.start(1000); // Collect chunks every second
       setAppState(AppState.RECORDING);
       
@@ -83,9 +96,25 @@ const App: React.FC = () => {
         setElapsedTime(prev => prev + 1);
       }, 1000);
 
-    } catch (err) {
+    } catch (err: any) {
       console.error("Error starting recording:", err);
+
+      // Handle "Permission denied" gracefully (User clicked Cancel)
+      if (err.name === 'NotAllowedError' || err.message?.includes('Permission denied')) {
+        setError(null);
+        setAppState(AppState.IDLE);
+        return;
+      }
+      
+      // Handle "InvalidStateError"
+      if (err.name === 'InvalidStateError') {
+         setError("Recording failed to start (Invalid State). Please try refreshing the page.");
+         setAppState(AppState.IDLE);
+         return;
+      }
+
       setError("Failed to start recording. Please ensure you grant screen permissions.");
+      setAppState(AppState.IDLE);
     }
   };
 
@@ -105,11 +134,6 @@ const App: React.FC = () => {
     
     try {
       const blob = new Blob(chunksRef.current, { type: 'video/webm' });
-      // In a real app, we might need to convert webm to mp4, 
-      // but Gemini often accepts webm or we can try. 
-      // If strict mp4 is needed, ffmpeg.wasm is required (too heavy for this snippet).
-      // We will send the blob as is, assuming the service handles the mime type correctly or accepts webm.
-      
       const generatedText = await generateLectureSummary(blob);
       setSummary(generatedText);
       setAppState(AppState.COMPLETED);
@@ -161,6 +185,13 @@ const App: React.FC = () => {
                 </p>
               </div>
               
+              {error && (
+                 <div className="p-3 bg-red-900/50 border border-red-700 rounded-lg flex items-start gap-2 text-sm text-red-200">
+                    <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+                    <span>{error}</span>
+                 </div>
+              )}
+
               <button
                 onClick={startRecording}
                 className="w-full group relative flex items-center justify-center gap-3 py-4 px-6 bg-red-600 hover:bg-red-500 text-white rounded-xl font-semibold transition-all shadow-lg hover:shadow-red-900/20"
