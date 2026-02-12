@@ -1,6 +1,7 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Download, ArrowLeft, Printer } from 'lucide-react';
+import { Download, ArrowLeft, Printer, FileText, Loader2 } from 'lucide-react';
+import { exportToPdf, exportViaPrint } from '../services/pdfExportService';
 
 interface SummaryViewProps {
   summary: string;
@@ -8,38 +9,80 @@ interface SummaryViewProps {
 }
 
 export const SummaryView: React.FC<SummaryViewProps> = ({ summary, onReset }) => {
-  
+  const contentRef = useRef<HTMLDivElement>(null);
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+
   // Ensure we are scrolled to top when view opens
   useEffect(() => {
     window.scrollTo(0, 0);
   }, []);
 
-  const handlePdfExport = () => {
-    // 1. Set title for PDF filename
-    const originalTitle = document.title;
-    const dateStr = new Date().toISOString().split('T')[0];
-    document.title = `Lecture_Summary_${dateStr}`;
+  // Cleanup effect for any pending operations
+  useEffect(() => {
+    return () => {
+      setIsExporting(false);
+      setExportError(null);
+    };
+  }, []);
 
-    // 2. Trigger print (which allows "Save as PDF")
-    // The timeout allows the UI to update/render if needed before the dialog freezes the main thread
-    setTimeout(() => {
-      window.print();
-      // Restore title after dialog closes
-      document.title = originalTitle;
-    }, 100);
-  };
+  /**
+   * Primary PDF export using jsPDF + html2canvas
+   * Provides proper Hebrew/RTL support
+   */
+  const handlePdfExport = useCallback(async () => {
+    if (!contentRef.current || isExporting) return;
 
-  const handleDownloadMarkdown = () => {
-    const blob = new Blob([summary], { type: 'text/markdown;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `lecture-summary-${new Date().toISOString().slice(0, 10)}.md`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
+    setIsExporting(true);
+    setExportError(null);
+
+    try {
+      await exportToPdf(contentRef.current, {
+        title: 'סיכום הרצאה וטרינרית',
+        includeDate: true,
+      });
+    } catch (error) {
+      console.error('PDF export failed:', error);
+      setExportError('PDF export failed. Falling back to print dialog...');
+      // Fallback to print dialog
+      exportViaPrint('Lecture_Summary');
+    } finally {
+      setIsExporting(false);
+    }
+  }, [isExporting]);
+
+  /**
+   * Fallback: Use browser print dialog
+   */
+  const handlePrintExport = useCallback(() => {
+    exportViaPrint('Lecture_Summary');
+  }, []);
+
+  /**
+   * Download as Markdown file
+   * Properly handles text encoding for Hebrew
+   */
+  const handleDownloadMarkdown = useCallback(() => {
+    try {
+      // Ensure proper UTF-8 encoding for Hebrew text
+      const blob = new Blob([summary], { 
+        type: 'text/markdown;charset=utf-8' 
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `lecture-summary-${new Date().toISOString().slice(0, 10)}.md`;
+      
+      // Use click() directly instead of appending to body
+      link.click();
+      
+      // Cleanup: revoke the blob URL to free memory
+      setTimeout(() => URL.revokeObjectURL(url), 100);
+    } catch (error) {
+      console.error('Markdown download failed:', error);
+      setExportError('Failed to download markdown file.');
+    }
+  }, [summary]);
 
   return (
     <div className="w-full min-h-screen flex flex-col items-center bg-gray-900 pb-12">
@@ -94,24 +137,38 @@ export const SummaryView: React.FC<SummaryViewProps> = ({ summary, onReset }) =>
             <ArrowLeft className="w-5 h-5 group-hover:-translate-x-1 transition-transform" />
             <span>Back to Recorder</span>
           </button>
-          <div className="flex gap-4">
-             <button
+          <div className="flex gap-3">
+            <button
               type="button"
               onClick={handleDownloadMarkdown}
               className="flex items-center gap-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg font-medium transition-colors border border-gray-700 cursor-pointer"
-              title="Download raw text file"
+              title="Download as Markdown file"
             >
-              <Download className="w-4 h-4" />
-              <span>Save Text</span>
+              <FileText className="w-4 h-4" />
+              <span>Markdown</span>
             </button>
-             <button
+            <button
               type="button"
-              onClick={handlePdfExport}
-              className="flex items-center gap-2 px-6 py-2 bg-vet-600 hover:bg-vet-500 text-white rounded-lg font-medium transition-colors shadow-lg cursor-pointer hover:shadow-vet-500/20"
-              title="Open Print Dialog to Save as PDF"
+              onClick={handlePrintExport}
+              className="flex items-center gap-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg font-medium transition-colors border border-gray-700 cursor-pointer"
+              title="Open browser print dialog"
             >
               <Printer className="w-4 h-4" />
-              <span>Print / PDF</span>
+              <span>Print</span>
+            </button>
+            <button
+              type="button"
+              onClick={handlePdfExport}
+              disabled={isExporting}
+              className="flex items-center gap-2 px-6 py-2 bg-vet-600 hover:bg-vet-500 disabled:bg-vet-700 disabled:cursor-wait text-white rounded-lg font-medium transition-colors shadow-lg cursor-pointer hover:shadow-vet-500/20"
+              title="Download as PDF with Hebrew support"
+            >
+              {isExporting ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <Download className="w-4 h-4" />
+              )}
+              <span>{isExporting ? 'Exporting...' : 'Save PDF'}</span>
             </button>
           </div>
         </div>
@@ -120,9 +177,21 @@ export const SummaryView: React.FC<SummaryViewProps> = ({ summary, onReset }) =>
       {/* Spacer for Fixed Header */}
       <div className="h-24 w-full print-header-spacer"></div>
 
+      {/* Error Message Display */}
+      {exportError && (
+        <div className="w-full max-w-4xl px-6 mb-4">
+          <div className="bg-yellow-900/50 border border-yellow-700 rounded-lg p-3 text-yellow-200 text-sm">
+            {exportError}
+          </div>
+        </div>
+      )}
+
       {/* Content Area - Designed for both Screen and Print */}
       <div className="w-full max-w-4xl px-6 flex-grow print:p-0 print:max-w-none print:w-full">
-        <div className="bg-white text-gray-900 rounded-xl shadow-2xl print:shadow-none print:rounded-none print:border-none print:m-0 h-full overflow-hidden">
+        <div 
+          ref={contentRef}
+          className="bg-white text-gray-900 rounded-xl shadow-2xl print:shadow-none print:rounded-none print:border-none print:m-0 h-full overflow-hidden"
+        >
           {/* Print Header */}
           <div className="bg-vet-900 text-white p-8 print:bg-white print:text-black print:p-0 print:mb-6 print:border-b-2 print:border-black">
             <div className="flex justify-between items-start">
