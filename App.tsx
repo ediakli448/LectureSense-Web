@@ -9,6 +9,7 @@ const App: React.FC = () => {
   const [summary, setSummary] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
   const [elapsedTime, setElapsedTime] = useState(0);
+  const [isInitializing, setIsInitializing] = useState(false); // New state to prevent double-clicks/freezing
   
   // Refs for state management across async operations and event listeners
   const appStateRef = useRef<AppState>(AppState.IDLE);
@@ -35,21 +36,38 @@ const App: React.FC = () => {
   };
 
   const startRecording = async () => {
+    // 1. Immediate UI Feedback (Prevents "Freezing" feeling)
+    setIsInitializing(true);
     setError(null);
+
     try {
       // Request screen capture with system audio
+      // Note: "systemAudio: 'include'" is a hint, user must still select it.
       const stream = await navigator.mediaDevices.getDisplayMedia({
         video: {
           frameRate: { ideal: 5 }
         },
-        audio: true
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          sampleRate: 44100
+        } 
       });
+
+      // 2. CRITICAL: Validate System Audio Check
+      // If the user forgot to check "Share System Audio", we must fail early.
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length === 0) {
+        // Stop the video track immediately to close the "Stop Sharing" banner
+        stream.getTracks().forEach(t => t.stop());
+        throw new Error("System Audio missing. You MUST check 'Share system audio' in the browser dialog.");
+      }
 
       // Handle user stopping the share via browser UI
       stream.getVideoTracks()[0].onended = () => {
         // Use ref to check current state, as closure 'appState' might be stale
         if (appStateRef.current === AppState.RECORDING) {
-           stopRecording();
+           stopRecording(); // Trigger logic, don't just call setAppState
         }
       };
 
@@ -78,9 +96,11 @@ const App: React.FC = () => {
       };
 
       mediaRecorder.onstop = () => {
-        handleRecordingStop();
-        // Stop all tracks to release the screen share indicator
-        stream.getTracks().forEach(track => track.stop());
+         // This listener is triggered by mediaRecorder.stop()
+         // We handle the actual processing in the stopRecording function or a helper
+         // But we ensure clean up here if needed.
+         stream.getTracks().forEach(track => track.stop());
+         handleRecordingStop(); 
       };
 
       // Ensure state is inactive before starting
@@ -101,26 +121,33 @@ const App: React.FC = () => {
 
       // Handle "Permission denied" gracefully (User clicked Cancel)
       if (err.name === 'NotAllowedError' || err.message?.includes('Permission denied')) {
-        setError(null);
+        setError(null); // No error message needed if user canceled voluntarily
         setAppState(AppState.IDLE);
         return;
       }
       
-      // Handle "InvalidStateError"
-      if (err.name === 'InvalidStateError') {
-         setError("Recording failed to start (Invalid State). Please try refreshing the page.");
-         setAppState(AppState.IDLE);
-         return;
+      // Specific error messaging
+      let errorMessage = "Failed to start recording.";
+      if (err.message.includes('System Audio missing')) {
+        errorMessage = err.message;
+      } else if (err.name === 'NotFoundError') {
+        errorMessage = "No recording device found.";
+      } else if (err.name === 'NotReadableError') {
+        errorMessage = "Hardware error: Could not access screen/audio.";
       }
 
-      setError("Failed to start recording. Please ensure you grant screen permissions.");
+      setError(errorMessage);
       setAppState(AppState.IDLE);
+    } finally {
+      // 3. Release the "Loading" state
+      setIsInitializing(false);
     }
   };
 
   const stopRecording = () => {
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
       mediaRecorderRef.current.stop();
+      // onstop event will fire handleRecordingStop
     }
   };
 
@@ -134,6 +161,11 @@ const App: React.FC = () => {
     
     try {
       const blob = new Blob(chunksRef.current, { type: 'video/webm' });
+      // Sanity check for blob size
+      if (blob.size === 0) {
+        throw new Error("Recording failed: Video file is empty.");
+      }
+      
       const generatedText = await generateLectureSummary(blob);
       setSummary(generatedText);
       setAppState(AppState.COMPLETED);
@@ -181,7 +213,7 @@ const App: React.FC = () => {
               <div className="text-center space-y-2">
                 <h2 className="text-xl font-semibold text-white">Ready to Record</h2>
                 <p className="text-sm text-gray-400">
-                  Ensure you select "Share System Audio" in the browser dialog to capture the lecturer's voice clearly.
+                  Ensure you select <strong className="text-white">"Share System Audio"</strong> in the browser dialog to capture the lecturer's voice clearly.
                 </p>
               </div>
               
@@ -194,10 +226,23 @@ const App: React.FC = () => {
 
               <button
                 onClick={startRecording}
-                className="w-full group relative flex items-center justify-center gap-3 py-4 px-6 bg-red-600 hover:bg-red-500 text-white rounded-xl font-semibold transition-all shadow-lg hover:shadow-red-900/20"
+                disabled={isInitializing}
+                className={`w-full group relative flex items-center justify-center gap-3 py-4 px-6 rounded-xl font-semibold transition-all shadow-lg 
+                  ${isInitializing 
+                    ? 'bg-gray-600 cursor-wait opacity-80' 
+                    : 'bg-red-600 hover:bg-red-500 hover:shadow-red-900/20 text-white'}`}
               >
-                <div className="w-3 h-3 rounded-full bg-white animate-pulse" />
-                Start Recording
+                {isInitializing ? (
+                   <>
+                     <Loader2 className="w-5 h-5 animate-spin" />
+                     <span>Initializing...</span>
+                   </>
+                ) : (
+                   <>
+                     <div className="w-3 h-3 rounded-full bg-white animate-pulse" />
+                     <span>Start Recording</span>
+                   </>
+                )}
               </button>
             </div>
           )}
