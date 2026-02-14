@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Download, ArrowLeft, FileCode, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, FileCode, AlertTriangle } from 'lucide-react';
 
 interface SummaryViewProps {
   summary: string;
@@ -30,19 +30,33 @@ export const SummaryView: React.FC<SummaryViewProps> = ({ summary, onReset }) =>
   const safeSummary = getSafeText(summary);
 
   const handleHtmlExport = () => {
-    // 1. Get the rendered HTML content directly from the DOM to ensure exact formatting matches
+    // 1. Logic to extract Dynamic Title from the Markdown content
+    // We look for the first non-empty line, which is usually the Header (## Topic)
+    const lines = safeSummary.split('\n');
+    let rawTitle = lines.find(line => line.trim().length > 0) || "";
+    
+    // Clean markdown symbols (#, *, etc) to get plain text
+    // Example: "## Lesson Summary: Canine Parvovirus" -> "Lesson Summary: Canine Parvovirus"
+    let dynamicTitle = rawTitle.replace(/^[#\s]+/, '').replace(/\*\*/g, '').replace(/\*/g, '').trim();
+    
+    // Fallback if extraction fails
+    if (!dynamicTitle) {
+        dynamicTitle = "Veterinary Lecture Summary";
+    }
+
+    // 2. Get the rendered HTML content directly from the DOM to ensure exact formatting matches
     const contentElement = document.getElementById('markdown-container');
     const renderedContent = contentElement ? contentElement.innerHTML : '';
     const dateStr = new Date().toISOString().split('T')[0];
     const filename = `Lecture_Summary_${dateStr}.html`;
 
-    // 2. Construct the full HTML5 document with embedded CSS and Metadata
+    // 3. Construct the full HTML5 document with embedded CSS and Metadata
     const htmlDocument = `<!DOCTYPE html>
 <html lang="he" dir="rtl">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LectureSense Summary - ${dateStr}</title>
+    <title>${dynamicTitle}</title>
     <style>
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
@@ -99,12 +113,13 @@ export const SummaryView: React.FC<SummaryViewProps> = ({ summary, onReset }) =>
             border: none;
             margin-bottom: 0.25rem;
             color: #456f7d; /* Vet Blue */
+            direction: rtl;
         }
     </style>
 </head>
 <body>
     <div class="meta-header">
-        <h1>סיכום הרצאה וטרינרית</h1>
+        <h1>${dynamicTitle}</h1>
         <p>LectureSense AI Companion • ${new Date().toLocaleDateString('he-IL')}</p>
     </div>
     
@@ -118,24 +133,12 @@ export const SummaryView: React.FC<SummaryViewProps> = ({ summary, onReset }) =>
 </body>
 </html>`;
 
-    // 3. Create Blob and trigger download
+    // 4. Create Blob and trigger download
     const blob = new Blob([htmlDocument], { type: 'text/html;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
     a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-
-  const handleDownloadMarkdown = () => {
-    const blob = new Blob([safeSummary], { type: 'text/markdown;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `lecture-summary-${new Date().toISOString().slice(0, 10)}.md`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -156,15 +159,7 @@ export const SummaryView: React.FC<SummaryViewProps> = ({ summary, onReset }) =>
             <span>Back to Recorder</span>
           </button>
           <div className="flex gap-4">
-             <button
-              type="button"
-              onClick={handleDownloadMarkdown}
-              className="flex items-center gap-2 px-4 py-2 bg-gray-800 hover:bg-gray-700 text-gray-200 rounded-lg font-medium transition-colors border border-gray-700 cursor-pointer"
-              title="Download raw text file"
-            >
-              <Download className="w-4 h-4" />
-              <span>Save MD</span>
-            </button>
+             {/* MD Button Removed as requested */}
              <button
               type="button"
               onClick={handleHtmlExport}
